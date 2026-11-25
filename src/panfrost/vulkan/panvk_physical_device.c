@@ -350,39 +350,19 @@ get_device_heaps(struct panvk_physical_device *device,
       os_get_gpu_heap_size(instance->drirc.misc.heap_memory_percent,
                            &instance->drirc.misc.heap_memory_percent);
 
-   device->memory.heap_count = 1;
+   device->memory.heap_count = 2;
    device->memory.heaps[0] = (VkMemoryHeap){
       .size = heap_size,
       .flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT,
    };
-
-   device->memory.type_count = 0;
-
-   /* We don't have VRAM, but we expose a device-local only type so we can
-    * prevent imported dma-bufs that come from other drivers/subsystems from
-    * being CPU-mapped.
-    */
-   device->memory.types[device->memory.type_count++] = (VkMemoryType) {
-      .propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-      .heapIndex = 0,
+   device->memory.heaps[1] = (VkMemoryHeap){
+      .size = 100ull * 1024 * 1024,
+      .flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT,
    };
 
-   if (device->kmod.dev->props.is_io_coherent) {
-      assert(device->memory.type_count < ARRAY_SIZE(device->memory.types));
-      /* If the device is coherent, we just have one memory type that's both
-       * host-cached and host-coherent. */
-      device->memory.types[device->memory.type_count++] = (VkMemoryType) {
-         .propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
-                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                          VK_MEMORY_PROPERTY_HOST_CACHED_BIT |
-                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-         .heapIndex = 0,
-      };
-   }
-
-   assert(device->memory.type_count < ARRAY_SIZE(device->memory.types));
+   device->memory.type_count = 0;
    host_coherent_not_cached_idx = device->memory.type_count;
-   device->memory.types[device->memory.type_count++] = (VkMemoryType){
+   device->memory.types[device->memory.type_count++] = (VkMemoryType) {
       .propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
@@ -421,6 +401,13 @@ get_device_heaps(struct panvk_physical_device *device,
       device->memory.types[host_coherent_not_cached_idx] =
          host_cached_not_coherent_type;
    }
+
+   assert(device->memory.type_count < ARRAY_SIZE(device->memory.types));
+   device->memory.types[device->memory.type_count++] = (VkMemoryType) {
+      .propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
+                       VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT,
+      .heapIndex = 0,
+   };
 
    const uint64_t request_va =
       PANVK_DEBUG(NO_EXTENDED_VA_RANGE) ? 1ull << 32 : 1ull << 48;
@@ -578,8 +565,8 @@ panvk_physical_device_init(struct panvk_physical_device *device,
 
    if (arch >= 10) {
       /* XXX: Make dri options for thoses */
-      device->csf.tiler.chunk_size = 2 * 1024 * 1024;
-      device->csf.tiler.initial_chunks = 5;
+      device->csf.tiler.chunk_size = 8 * 1024 * 1024;
+      device->csf.tiler.initial_chunks = 2;
       device->csf.tiler.max_chunks = 64;
    }
 
@@ -888,6 +875,10 @@ panvk_GetPhysicalDeviceMemoryProperties2(
          /* Set the budget at 90% of available to avoid thrashing */
          p->heapBudget[0] = vk_physical_device_heap_budget_from_system(
             &physical_device->vk, 0.9f, heap_size, used);
+         p->heapUsage[1] = 0;
+         p->heapBudget[1] = vk_physical_device_heap_budget_from_system(
+            &physical_device->vk, 0.9f,
+            physical_device->memory.heaps[1].size, 0);
 
          /* From the Vulkan 1.3.278 spec:
           *
@@ -897,7 +888,7 @@ panvk_GetPhysicalDeviceMemoryProperties2(
           *    heapBudget value must be non-zero for array elements less than
           *    VkPhysicalDeviceMemoryProperties::memoryHeapCount."
           */
-         for (unsigned i = 1; i < VK_MAX_MEMORY_HEAPS; i++) {
+         for (unsigned i = 2; i < VK_MAX_MEMORY_HEAPS; i++) {
             p->heapBudget[i] = 0;
             p->heapUsage[i] = 0;
          }

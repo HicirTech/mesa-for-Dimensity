@@ -71,11 +71,9 @@ def main():
         'schemaVersion': 1,
         # Launchers (Winlator, Bannerlator) install a driver into a directory named after this:
         # no path separators, or the install is left behind as "tmp".
-        'name': 'PanVK 9300 (kbase) (Mesa %s%s)' % (mesa_version, suffix),
-        'description': 'PanVK on the stock Arm kbase kernel driver, targeting the '
-                       'Dimensity 9300+ (Immortalis-G720), based on Mesa %s. The kbase '
-                       'port is from mali-panvk by JimVulkan.' % mesa_version,
-        'author': 'panvk-9300',
+        'name': 'PanVK G925-Imortallis v0.002 (Mesa %s%s)' % (mesa_version, suffix),
+        'description': 'PanVK Vulkan driver Optimized for Mali G925-Imortallis',
+        'author': 'adesyaefull',
         'packageVersion': count,
         'vendor': 'Mesa',
         'driverVersion': vulkan,
@@ -84,7 +82,7 @@ def main():
     }
 
     os.makedirs(out_dir, exist_ok=True)
-    zip_path = os.path.join(out_dir, 'panvk-9300-%s%s.zip' % (mesa_version, suffix))
+    zip_path = os.path.join(out_dir, 'PanVK-Kbase-Android-g925-v13-csf-v0.0.2-Mesa-%s%s.zip' % (mesa_version,suffix))
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as z:
         z.writestr('meta.json', json.dumps(meta, indent=2) + '\n')
         z.write(lib, 'libvulkan_panfrost.so')

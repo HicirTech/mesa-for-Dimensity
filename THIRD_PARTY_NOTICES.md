@@ -1,6 +1,6 @@
 # Third-party notices
 
-This repository is a subset of Mesa 27.0.0-devel with changes by JimVulkan. Every file
+This repository is a subset of Mesa 27.0.0-devel with changes by Adesyaefull. Every file
 keeps the license stated in its header, and most are MIT (`LICENSE`); `docs/license.rst`
 is Mesa's own overview. The files below are under other licenses. Full license texts
 are in `LICENSES/`.

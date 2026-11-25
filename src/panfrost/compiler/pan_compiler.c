@@ -52,13 +52,13 @@ static const struct debug_named_value pan_use_kraid_flags[] = {
    DEBUG_NAMED_VALUE_END,
 };
 
-/* Off by default in this tree: on Immortalis-G720 (v12) an FP32 FMA loop
- * with eight vec4 accumulators runs at 980 GFLOPS with Kraid against 1875
- * with the C compiler. Kraid's code uses all 64 work registers and about
- * twice the CVT cycles (1.03 against 0.55 per thread), so the loop becomes
- * CVT-bound. PAN_USE_KRAID=all turns it on again. */
+/* Enabled by default: on Immortalis-G720 (v12) an FP32 FMA loop with eight
+ * vec4 accumulators runs at 980 GFLOPS with Kraid against 1875 with the C
+ * compiler. Kraid's code uses all 64 work registers and about twice the CVT
+ * cycles (1.03 against 0.55 per thread), so the loop becomes CVT-bound.
+ * PAN_USE_KRAID=0 disables Kraid; stage flags can select a subset. */
 DEBUG_GET_ONCE_FLAGS_OPTION(use_kraid, "PAN_USE_KRAID",
-                            pan_use_kraid_flags, 0)
+                            pan_use_kraid_flags, USE_KRAID_ALL)
 #endif
 
 bool

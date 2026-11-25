@@ -71,7 +71,7 @@ struct panvk_physical_device {
    uint8_t cache_uuid[VK_UUID_SIZE];
 
    struct {
-      VkMemoryHeap heaps[1];
+      VkMemoryHeap heaps[2];
       uint32_t heap_count;
 
       VkMemoryType types[4];

@@ -74,7 +74,9 @@ cmd_get_push_desc_set(struct vk_command_buffer *vk_cmdbuf,
          list_first_entry(&pool->push_sets, struct panvk_push_set, base.node);
       list_del(&push_set->base.node);
       list_addtail(&push_set->base.node, &cmdbuf->push_sets);
-      memset(push_set->descs, 0, sizeof(push_set->descs));
+      if (push_set->desc_capacity)
+         memset(push_set->descs, 0,
+                push_set->desc_capacity * sizeof(*push_set->descs));
    } else {
       push_set = vk_zalloc(&pool->vk.alloc, sizeof(*push_set), 8,
                            VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
@@ -98,6 +100,45 @@ cmd_get_push_desc_set(struct vk_command_buffer *vk_cmdbuf,
    desc_state->sets[set_idx] = set;
 
    BITSET_SET(desc_state->dirty_push_sets, set_idx);
+   return set;
+}
+
+static struct panvk_descriptor_set *
+cmd_prepare_push_desc_set(struct panvk_cmd_buffer *cmdbuf,
+                          struct panvk_descriptor_state *desc_state,
+                          uint32_t set_idx,
+                          const struct panvk_descriptor_set_layout *layout)
+{
+   struct panvk_descriptor_set *set =
+      cmd_get_push_desc_set(&cmdbuf->vk, desc_state, set_idx);
+   if (!set)
+      return NULL;
+
+   struct panvk_push_set *push_set =
+      container_of(set, struct panvk_push_set, set);
+   if (layout->desc_count > push_set->desc_capacity) {
+      struct panvk_cmd_pool *pool =
+         container_of(cmdbuf->vk.pool, struct panvk_cmd_pool, vk);
+      uint32_t old_capacity = push_set->desc_capacity;
+      size_t size = (size_t)layout->desc_count * sizeof(*push_set->descs);
+      struct panvk_opaque_desc *descs =
+         vk_realloc(&pool->vk.alloc, push_set->descs, size, 8,
+                    VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+      if (!descs) {
+         vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
+         return NULL;
+      }
+
+      memset(descs + old_capacity, 0,
+             (layout->desc_count - old_capacity) * sizeof(*descs));
+      push_set->descs = descs;
+      push_set->desc_capacity = layout->desc_count;
+      push_set->base.aux_data = descs;
+      set->descs.host = descs;
+   }
+
+   set->layout = layout;
+   set->desc_count = layout->desc_count;
    return set;
 }
 
@@ -484,13 +525,10 @@ push_desc_set_write(struct panvk_cmd_buffer *cmd,
    const struct panvk_descriptor_set_layout *set_layout =
       to_panvk_descriptor_set_layout(playout->set_layouts[info->set]);
 
-   struct panvk_descriptor_set *push_set =
-      cmd_get_push_desc_set(&cmd->vk, desc, info->set);
+   struct panvk_descriptor_set *push_set = cmd_prepare_push_desc_set(
+      cmd, desc, info->set, set_layout);
    if (!push_set)
       return;
-
-   push_set->layout = set_layout;
-   push_set->desc_count = set_layout->desc_count;
 
    for (uint32_t i = 0; i < info->descriptorWriteCount; i++)
       panvk_per_arch(descriptor_set_write)(push_set,
@@ -537,13 +575,10 @@ panvk_per_arch(CmdPushDescriptorSetWithTemplate2KHR)(
       to_panvk_descriptor_set_layout(playout->set_layouts[set]);
    struct panvk_descriptor_state *desc_state =
       panvk_cmd_get_desc_state(cmdbuf, template->bind_point);
-   struct panvk_descriptor_set *push_set =
-      cmd_get_push_desc_set(&cmdbuf->vk, desc_state, set);
+   struct panvk_descriptor_set *push_set = cmd_prepare_push_desc_set(
+      cmdbuf, desc_state, set, set_layout);
    if (!push_set)
       return;
-
-   push_set->layout = set_layout;
-   push_set->desc_count = set_layout->desc_count;
 
    panvk_per_arch(descriptor_set_write_template)(
       push_set, template, pPushDescriptorSetWithTemplateInfo->pData, true);

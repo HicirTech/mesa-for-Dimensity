@@ -1,9 +1,9 @@
-PanVK for Mali on kbase -- third-party notices
+PanVK Vulkan driver Optimized for Mali G925-Imortallis -- third-party notices
 ==============================================
 
-libvulkan_panfrost.so is built from the panvk-9300 branch of a fork of the Mesa 3D Graphics
+libvulkan_panfrost.so is built from the adesaeyfull branch of a fork of the Mesa 3D Graphics
 Library 27.0.0-devel, which carries the kbase port and Mali changes of mali-panvk by
-JimVulkan. The components below are compiled into it. Each is followed by its copyright
+adesaeyfull. The components below are compiled into it. Each is followed by its copyright
 holders; the license texts are at the end of this file.
 
 Mesa 3D Graphics Library (PanVK, the Bifrost and Valhall compiler, the Kraid compiler,

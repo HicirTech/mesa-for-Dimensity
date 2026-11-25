@@ -67,6 +67,9 @@ struct pan_kmod_kbase_atom {
  * kernel returns SUCCESS for DRM ioctls it does not implement. */
 bool pan_kmod_dev_is_kbase(const struct pan_kmod_dev *dev);
 
+/* True when this kbase device has a dma-heap available for shareable BOs. */
+bool kbase_kmod_supports_dmabuf(const struct pan_kmod_dev *dev);
+
 /* What this process has mapped on the GPU now, by label (see kbase_kmod.c). */
 void pan_kmod_kbase_mem_report(FILE *out);
 

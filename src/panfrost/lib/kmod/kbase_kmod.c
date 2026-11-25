@@ -25,6 +25,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/dma-heap.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -151,7 +152,13 @@ union kbase_ioctl_mem_import {
 #define KBASE_IOCTL_MEM_IMPORT_40                                                                 \
    _IOC(_IOC_READ | _IOC_WRITE, KBASE_IOCTL_TYPE, 22, 40)
 #define BASE_MEM_IMPORT_TYPE_UMM 2
+#define BASE_MEM_PROT_CPU_RD (1ull << 0)
+#define BASE_MEM_PROT_CPU_WR (1ull << 1)
+#define BASE_MEM_PROT_GPU_RD (1ull << 2)
+#define BASE_MEM_PROT_GPU_WR (1ull << 3)
+#define BASE_MEM_COHERENT_SYSTEM (1ull << 10)
 #define BASE_MEM_SAME_VA         (1ull << 13)
+#define BASE_MEM_IMPORT_SHARED   (1ull << 18)
 /* What a SAME_VA import reports back instead of SAME_VA: gpu_va is a cookie to mmap. Measured,
  * the returned flags are 0x500f for a request of 0x200f. */
 #define BASE_MEM_NEED_MMAP       (1ull << 14)
@@ -314,6 +321,7 @@ struct kbase_kmod_dev {
    struct pan_kmod_dev base;
    struct kbase_kmod_vm *vm;
    uint32_t next_handle;
+   int dma_heap_fd;
    struct kbase_queue queue;
    /* enum kbase_atom_layout, measured when the context is created. */
    int atom_layout;
@@ -340,6 +348,11 @@ struct kbase_kmod_bo {
    void *anchor;
    /* The anchor's length: the BO's, plus its guard page (kbase_guard_mode). */
    uint64_t anchor_size;
+   int dmabuf_fd;
+   void *cpu_mapping;
+   void *gpu_mapping;
+   bool imported;
+   bool same_va;
    bool exec;
 };
 
@@ -509,6 +522,7 @@ kbase_kmod_dev_create(int fd, uint32_t flags, const struct pan_kmod_allocator *a
       return NULL;
    }
    memset(kbase_dev, 0, sizeof(*kbase_dev));
+   kbase_dev->dma_heap_fd = -1;
 
    /* The handshake, in the order the vendor driver performs it. VERSION_CHECK VALIDATES rather
     * than reports: the payload comes back unchanged, so a mismatched pair is refused by the
@@ -591,6 +605,13 @@ kbase_kmod_dev_create(int fd, uint32_t flags, const struct pan_kmod_allocator *a
    kbase_dev->next_handle = 1;
    kbase_queue_init(&kbase_dev->queue);
 
+   const char *dma_heap = getenv("PANVK_KBASE_DMA_HEAP");
+   if (!dma_heap || !dma_heap[0])
+      dma_heap = "/dev/dma_heap/system";
+   kbase_dev->dma_heap_fd = open(dma_heap, O_RDONLY | O_CLOEXEC);
+   if (kbase_dev->dma_heap_fd < 0)
+      mesa_logd("kbase: dma-heap unavailable at %s: %s", dma_heap, strerror(errno));
+
    /* A dup()ed fd of an existing context answers neither handshake, so CSF is decided by the
     * GPU: v10 and later are CSF parts. */
    kbase_dev->csf = PAN_ARCH_MAJOR(kbase_dev->base.props.gpu_id) >= 10;
@@ -606,6 +627,8 @@ kbase_kmod_dev_create(int fd, uint32_t flags, const struct pan_kmod_allocator *a
    return &kbase_dev->base;
 
 err_free_dev:
+   if (kbase_dev->dma_heap_fd >= 0)
+      close(kbase_dev->dma_heap_fd);
    pan_kmod_free(allocator, kbase_dev);
    return NULL;
 }
@@ -617,6 +640,8 @@ kbase_kmod_dev_destroy(struct pan_kmod_dev *dev)
 
    kbase_csf_dev_finish(kbase_dev);
    kbase_queue_finish(kbase_dev);
+   if (kbase_dev->dma_heap_fd >= 0)
+      close(kbase_dev->dma_heap_fd);
    pan_kmod_dev_cleanup(dev);
    pan_kmod_free(dev->allocator, kbase_dev);
 }
@@ -998,10 +1023,141 @@ kbase_guard_mode(void)
 }
 
 static struct pan_kmod_bo *
+kbase_kmod_bo_import_dmabuf(struct pan_kmod_dev *dev, struct pan_kmod_vm *exclusive_vm,
+                            int fd, uint64_t size, uint32_t flags)
+{
+   struct kbase_kmod_dev *kbase_dev = container_of(dev, struct kbase_kmod_dev, base);
+   struct kbase_kmod_bo *bo = pan_kmod_dev_alloc(dev, sizeof(*bo));
+   if (!bo)
+      return NULL;
+
+   bo->dmabuf_fd = fcntl(fd, F_DUPFD_CLOEXEC, 3);
+   bo->cpu_mapping = NULL;
+   bo->gpu_mapping = NULL;
+   if (bo->dmabuf_fd < 0) {
+      mesa_loge("kbase: failed to duplicate dma-buf: %s", strerror(errno));
+      goto err_free_bo;
+   }
+
+   uint64_t import_flags = BASE_MEM_PROT_CPU_RD | BASE_MEM_PROT_CPU_WR |
+                           BASE_MEM_PROT_GPU_RD | BASE_MEM_PROT_GPU_WR |
+                           BASE_MEM_IMPORT_SHARED | BASE_MEM_COHERENT_SYSTEM;
+   if (flags & PAN_KMOD_BO_FLAG_GPU_UNCACHED)
+      import_flags |= BASE_MEM_UNCACHED_GPU;
+   if (flags & PAN_KMOD_BO_FLAG_WB_MMAP)
+      import_flags |= BASE_MEM_CACHED_CPU;
+
+   int import_fd = bo->dmabuf_fd;
+   union kbase_ioctl_mem_import req = {
+      .in = {
+         .flags = import_flags,
+         .phandle = (uintptr_t)&import_fd,
+         .type = BASE_MEM_IMPORT_TYPE_UMM,
+      },
+   };
+   if (pan_kmod_ioctl(dev->fd, KBASE_IOCTL_MEM_IMPORT, &req)) {
+      mesa_loge("kbase: MEM_IMPORT of dma-buf failed: %s", strerror(errno));
+      goto err_close_dmabuf;
+   }
+
+   const uint64_t bo_size = req.out.va_pages * 4096;
+   bo->same_va = (req.out.flags & (BASE_MEM_SAME_VA | BASE_MEM_NEED_MMAP)) != 0;
+   if (!bo->same_va || bo_size < size) {
+      mesa_loge("kbase: MEM_IMPORT returned flags 0x%" PRIx64 " and size 0x%" PRIx64
+                " for request 0x%" PRIx64,
+                req.out.flags, bo_size, size);
+      goto err_free_region;
+   }
+
+   bo->gpu_mapping = os_mmap(NULL, bo_size, PROT_READ | PROT_WRITE, MAP_SHARED, dev->fd,
+                             (off_t)req.out.gpu_va);
+   if (bo->gpu_mapping == MAP_FAILED) {
+      const int err = errno;
+      bo->gpu_mapping = NULL;
+      mesa_loge("kbase: mmap of imported dma-buf failed: %s", strerror(err));
+      errno = err;
+      goto err_free_region;
+   }
+
+   if (!(flags & PAN_KMOD_BO_FLAG_NO_MMAP)) {
+      bo->cpu_mapping = os_mmap(NULL, bo_size, PROT_READ | PROT_WRITE, MAP_SHARED,
+                                bo->dmabuf_fd, 0);
+      if (bo->cpu_mapping == MAP_FAILED) {
+         const int err = errno;
+         bo->cpu_mapping = NULL;
+         mesa_loge("kbase: CPU mmap of imported dma-buf failed: %s", strerror(err));
+         errno = err;
+         goto err_free_region;
+      }
+   }
+
+   bo->imported = true;
+   bo->gpu_va = (uint64_t)(uintptr_t)bo->gpu_mapping;
+   pan_kmod_bo_init(&bo->base, dev, exclusive_vm, bo_size, flags,
+                    p_atomic_inc_return(&kbase_dev->next_handle));
+   kbase_bo_history_add(kbase_bo_allocs, &kbase_bo_alloc_next, bo->gpu_va, bo_size, flags);
+   kbase_live_add(bo->gpu_va, bo_size, flags, bo->same_va, false,
+                  (uintptr_t)__builtin_return_address(0));
+   return &bo->base;
+
+err_free_region: {
+   if (bo->gpu_mapping) {
+      if (os_munmap(bo->gpu_mapping, bo_size))
+         mesa_loge("kbase: unmapping failed dma-buf import: %s", strerror(errno));
+   } else if (bo->same_va && bo_size) {
+      void *mapping =
+         os_mmap(NULL, bo_size, PROT_NONE, MAP_SHARED, dev->fd, (off_t)req.out.gpu_va);
+      if (mapping != MAP_FAILED) {
+         if (os_munmap(mapping, bo_size))
+            mesa_loge("kbase: releasing failed SAME_VA import: %s", strerror(errno));
+      } else {
+         mesa_loge("kbase: could not release failed SAME_VA import: %s", strerror(errno));
+      }
+   }
+   if (!bo->same_va) {
+      struct kbase_ioctl_mem_free free_req = {.gpu_addr = req.out.gpu_va};
+      if (pan_kmod_ioctl(dev->fd, KBASE_IOCTL_MEM_FREE, &free_req))
+         mesa_logd("kbase: MEM_FREE after failed dma-buf import: %s", strerror(errno));
+   }
+}
+err_close_dmabuf:
+   close(bo->dmabuf_fd);
+err_free_bo:
+   pan_kmod_dev_free(dev, bo);
+   return NULL;
+}
+
+static struct pan_kmod_bo *
+kbase_kmod_bo_alloc_dmabuf(struct pan_kmod_dev *dev, struct pan_kmod_vm *exclusive_vm,
+                           uint64_t size, uint32_t flags)
+{
+   struct kbase_kmod_dev *kbase_dev = container_of(dev, struct kbase_kmod_dev, base);
+   struct dma_heap_allocation_data alloc = {
+      .len = DIV_ROUND_UP(size, 4096) * 4096,
+      .fd_flags = O_RDWR | O_CLOEXEC,
+   };
+
+   if (ioctl(kbase_dev->dma_heap_fd, DMA_HEAP_IOCTL_ALLOC, &alloc)) {
+      mesa_loge("kbase: DMA_HEAP_IOCTL_ALLOC failed: %s", strerror(errno));
+      return NULL;
+   }
+
+   struct pan_kmod_bo *bo =
+      kbase_kmod_bo_import_dmabuf(dev, exclusive_vm, alloc.fd, alloc.len, flags);
+   close(alloc.fd);
+   return bo;
+}
+
+static struct pan_kmod_bo *
 kbase_kmod_bo_alloc(struct pan_kmod_dev *dev, struct pan_kmod_vm *exclusive_vm, uint64_t size,
                     uint32_t flags)
 {
    struct kbase_kmod_dev *kbase_dev = container_of(dev, struct kbase_kmod_dev, base);
+
+   if (!exclusive_vm && kbase_dev->dma_heap_fd >= 0 &&
+       !(flags & (PAN_KMOD_BO_FLAG_EXECUTABLE | PAN_KMOD_BO_FLAG_ALLOC_ON_FAULT |
+                  PAN_KMOD_BO_FLAG_KBASE_SYNC)))
+      return kbase_kmod_bo_alloc_dmabuf(dev, exclusive_vm, size, flags);
 
    /* Nothing in the captured traffic shows how to ask for a GPU-uncached mapping on the JM
     * kernels, and guessing a flag bit there would be silently wrong rather than loudly. Refuse, as
@@ -1019,6 +1175,11 @@ kbase_kmod_bo_alloc(struct pan_kmod_dev *dev, struct pan_kmod_vm *exclusive_vm, 
    struct kbase_kmod_bo *bo = pan_kmod_dev_alloc(dev, sizeof(*bo));
    if (!bo)
       return NULL;
+   bo->dmabuf_fd = -1;
+   bo->cpu_mapping = NULL;
+   bo->gpu_mapping = NULL;
+   bo->imported = false;
+   bo->same_va = !exec;
 
    const uint64_t pages = DIV_ROUND_UP(size, 4096);
    union kbase_ioctl_mem_alloc req = {
@@ -1108,7 +1269,21 @@ kbase_kmod_bo_free(struct pan_kmod_bo *bo)
    kbase_bo_history_add(kbase_bo_frees, &kbase_bo_free_next, kbase_bo->gpu_va, bo->size,
                         bo->flags);
 
-   if (kbase_bo->exec) {
+   if (kbase_bo->imported) {
+      if (kbase_bo->cpu_mapping &&
+          os_munmap(kbase_bo->cpu_mapping, bo->size))
+         mesa_loge("kbase: unmapping dma-buf CPU view failed: %s", strerror(errno));
+      if (kbase_bo->gpu_mapping &&
+          os_munmap(kbase_bo->gpu_mapping, bo->size))
+         mesa_loge("kbase: unmapping dma-buf GPU view failed: %s", strerror(errno));
+      if (!kbase_bo->same_va) {
+         struct kbase_ioctl_mem_free req = {.gpu_addr = kbase_bo->gpu_va};
+         if (pan_kmod_ioctl(bo->dev->fd, KBASE_IOCTL_MEM_FREE, &req))
+            mesa_loge("kbase: MEM_FREE(0x%" PRIx64 ") failed: %s",
+                      kbase_bo->gpu_va, strerror(errno));
+      }
+      close(kbase_bo->dmabuf_fd);
+   } else if (kbase_bo->exec) {
       struct kbase_ioctl_mem_free req = {.gpu_addr = kbase_bo->gpu_va};
       if (pan_kmod_ioctl(bo->dev->fd, KBASE_IOCTL_MEM_FREE, &req))
          mesa_loge("kbase: MEM_FREE(0x%" PRIx64 ") failed (err=%d)", kbase_bo->gpu_va, errno);
@@ -1131,19 +1306,49 @@ kbase_kmod_bo_set_label(struct pan_kmod_dev *dev, struct pan_kmod_bo *bo, const 
 static void *
 kbase_kmod_bo_mmap(struct pan_kmod_bo *bo, int prot, int flags, void *host_addr)
 {
+   struct kbase_kmod_bo *kbase_bo = container_of(bo, struct kbase_kmod_bo, base);
+
+   if (kbase_bo->imported) {
+      if (!kbase_bo->cpu_mapping) {
+         errno = EINVAL;
+         return MAP_FAILED;
+      }
+      if (!host_addr || host_addr == kbase_bo->cpu_mapping)
+         return kbase_bo->cpu_mapping;
+
+      return os_mmap(host_addr, bo->size, prot, MAP_SHARED | MAP_FIXED,
+                     kbase_bo->dmabuf_fd, 0);
+   }
+
    /* Both zones map at offset = the BO's GPU VA. For an exec BO that is the address the kernel
     * returned; for an ordinary one it is the anchor's address, and mapping it again yields a
     * second CPU view of the same memory. */
-   const off_t offset = container_of(bo, struct kbase_kmod_bo, base)->gpu_va;
+   const off_t offset = kbase_bo->gpu_va;
    return os_mmap(host_addr, bo->size, prot, flags, bo->dev->fd, offset);
 }
 
 static int
 kbase_kmod_bo_export(struct pan_kmod_bo *bo)
 {
-   /* kbase memory has no dma-buf of its own to hand out. */
-   mesa_loge("kbase: bo_export is not implemented");
-   return -1;
+   struct kbase_kmod_bo *kbase_bo = container_of(bo, struct kbase_kmod_bo, base);
+   if (kbase_bo->dmabuf_fd < 0) {
+      errno = ENOTSUP;
+      return -1;
+   }
+
+   return fcntl(kbase_bo->dmabuf_fd, F_DUPFD_CLOEXEC, 3);
+}
+
+static int
+kbase_kmod_bo_munmap(struct pan_kmod_bo *bo, void *host_addr, size_t size)
+{
+   struct kbase_kmod_bo *kbase_bo = container_of(bo, struct kbase_kmod_bo, base);
+
+   if (kbase_bo->imported &&
+       (host_addr == kbase_bo->cpu_mapping || host_addr == kbase_bo->gpu_mapping))
+      return 0;
+
+   return os_munmap(host_addr, size);
 }
 
 static bool
@@ -1863,6 +2068,13 @@ pan_kmod_dev_is_kbase(const struct pan_kmod_dev *dev)
    return dev->ops == &kbase_kmod_ops;
 }
 
+bool
+kbase_kmod_supports_dmabuf(const struct pan_kmod_dev *dev)
+{
+   const struct kbase_kmod_dev *kbase_dev = container_of(dev, struct kbase_kmod_dev, base);
+   return kbase_dev->dma_heap_fd >= 0;
+}
+
 /* ---- asynchronous submission ------------------------------------------------------------
  *
  * Submitting used to mean waiting: the caller read the device fd until every atom it had sent
@@ -2321,10 +2533,6 @@ pan_kmod_kbase_submit(struct pan_kmod_dev *dev, const struct pan_kmod_kbase_atom
    pan_kmod_kbase_wait_seq(dev, seq);
    return ok;
 }
-
-#define BASE_MEM_PROT_GPU_RD (1ull << 2)
-#define BASE_MEM_PROT_GPU_WR (1ull << 3)
-#define BASE_MEM_PROT_CPU_RD (1ull << 0)
 
 /* ---- repeated mappings -------------------------------------------------------------------------
  *
@@ -4019,6 +4227,7 @@ const struct pan_kmod_ops kbase_kmod_ops = {
    .bo_import = kbase_kmod_bo_import,
    .bo_export = kbase_kmod_bo_export,
    .bo_mmap = kbase_kmod_bo_mmap,
+   .bo_munmap = kbase_kmod_bo_munmap,
    .bo_set_label = kbase_kmod_bo_set_label,
    .bo_wait = kbase_kmod_bo_wait,
    .vm_create = kbase_kmod_vm_create,

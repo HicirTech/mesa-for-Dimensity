@@ -492,6 +492,10 @@ struct pan_kmod_ops {
    /* Map the buffer object to device memory. */
    void *(*bo_mmap)(struct pan_kmod_bo *bo, int prot, int flags, void *host_addr);
 
+   /* Unmap a CPU mapping. This method is optional for backends that keep a
+    * persistent CPU mapping for the lifetime of the BO. */
+   int (*bo_munmap)(struct pan_kmod_bo *bo, void *host_addr, size_t size);
+
    /* Flush the pending BO map syncs. */
    int (*flush_bo_map_syncs)(struct pan_kmod_dev *dev);
 
@@ -747,6 +751,15 @@ pan_kmod_bo_mmap(struct pan_kmod_bo *bo, int prot, int flags, void *host_addr)
                 bo->size, prot, flags, strerror(errno));
 
    return host_addr;
+}
+
+static inline int
+pan_kmod_bo_munmap(struct pan_kmod_bo *bo, void *host_addr, size_t size)
+{
+   if (bo->dev->ops->bo_munmap)
+      return bo->dev->ops->bo_munmap(bo, host_addr, size);
+
+   return os_munmap(host_addr, size);
 }
 
 static inline bool

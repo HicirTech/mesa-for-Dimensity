@@ -28,6 +28,7 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(panvk_cmd_pool, vk.base, VkCommandPool,
 
 struct panvk_cmd_pool_obj {
    struct list_head node;
+   void *aux_data;
 };
 
 #endif

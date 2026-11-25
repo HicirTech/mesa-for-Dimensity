@@ -766,7 +766,9 @@ panvk_per_arch(get_physical_device_features)(
       .nestedCommandBufferSimultaneousUse = PAN_ARCH >= 10,
 
       /* VK_EXT_map_memory_placed */
-      .memoryMapPlaced = true,
+      .memoryMapPlaced =
+         !pan_kmod_dev_is_kbase(device->kmod.dev) ||
+         kbase_kmod_supports_dmabuf(device->kmod.dev),
       .memoryMapRangePlaced = false,
       .memoryUnmapReserve = true,
 
@@ -828,9 +830,9 @@ panvk_per_arch(get_physical_device_features)(
 
 #ifdef PANVK_USE_WSI_PLATFORM
       /* VK_EXT_present_timing */
-      .presentTiming = true,
-      .presentAtRelativeTime = true,
-      .presentAtAbsoluteTime = true,
+      .presentTiming = device->kmod.dev->props.gpu_can_query_timestamp,
+      .presentAtRelativeTime = device->kmod.dev->props.gpu_can_query_timestamp,
+      .presentAtAbsoluteTime = device->kmod.dev->props.gpu_can_query_timestamp,
 #endif
 
       /* VK_EXT_rasterization_order_attachment_access */

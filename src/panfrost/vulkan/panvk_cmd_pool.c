@@ -71,6 +71,7 @@ panvk_DestroyCommandPool(VkDevice _device, VkCommandPool commandPool,
    list_for_each_entry_safe(struct panvk_cmd_pool_obj, obj, &pool->push_sets,
                             node) {
       list_del(&obj->node);
+      vk_free(&pool->vk.alloc, obj->aux_data);
       vk_free(&pool->vk.alloc, obj);
    }
 

@@ -3,6 +3,10 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <errno.h>
+#include <inttypes.h>
+#include <string.h>
+
 #include "genxml/decode.h"
 
 #include "vulkan/util/vk_util.h"
@@ -115,9 +119,13 @@ panvk_AllocateMemory(VkDevice _device,
           (type->propertyFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT))
          bo_flags |= PAN_KMOD_BO_FLAG_WB_MMAP;
 
+      const bool shareable =
+         can_be_exported ||
+         (device->vk.enabled_features.memoryMapPlaced &&
+          (type->propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT));
       bo_flags = panvk_device_adjust_bo_flags(device, bo_flags);
       mem->bo = pan_kmod_bo_alloc(device->kmod.dev,
-                                  can_be_exported ? NULL : device->kmod.vm,
+                                  shareable ? NULL : device->kmod.vm,
                                   pAllocateInfo->allocationSize, bo_flags);
       if (!mem->bo) {
          result = panvk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
@@ -261,11 +269,13 @@ panvk_FreeMemory(VkDevice _device, VkDeviceMemory _mem,
                             pan_kmod_bo_size(mem->bo));
 
       if (mem->debug.host_mapping)
-         os_munmap(mem->debug.host_mapping, pan_kmod_bo_size(mem->bo));
+         pan_kmod_bo_munmap(mem->bo, mem->debug.host_mapping,
+                            pan_kmod_bo_size(mem->bo));
    }
 
    if (mem->addr.host) {
-      ASSERTED int ret = os_munmap(mem->addr.host, pan_kmod_bo_size(mem->bo));
+      ASSERTED int ret = pan_kmod_bo_munmap(mem->bo, mem->addr.host,
+                                            pan_kmod_bo_size(mem->bo));
       assert(!ret);
    }
 
@@ -341,17 +351,25 @@ panvk_MapMemory2KHR(VkDevice _device, const VkMemoryMapInfoKHR *pMemoryMapInfo,
    if (pMemoryMapInfo->flags & VK_MEMORY_MAP_PLACED_BIT_EXT) {
       const VkMemoryMapPlacedInfoEXT *placed_info = vk_find_struct_const(
          pMemoryMapInfo->pNext, MEMORY_MAP_PLACED_INFO_EXT);
-      assert(placed_info != NULL);
-      assert(offset == 0 && size == mem->bo->size);
+      if (!placed_info || !placed_info->pPlacedAddress)
+         return panvk_errorf(device, VK_ERROR_MEMORY_MAP_FAILED,
+                             "Placed memory map has no target address.");
+      if (offset != 0 || size != mem->vk.size)
+         return panvk_errorf(device, VK_ERROR_MEMORY_MAP_FAILED,
+                             "Placed memory maps must cover the full allocation.");
       host_addr = placed_info->pPlacedAddress;
       map_flags |= MAP_FIXED;
    }
 
    void *addr =
       pan_kmod_bo_mmap(mem->bo, PROT_READ | PROT_WRITE, map_flags, host_addr);
-   if (addr == MAP_FAILED)
+   if (addr == MAP_FAILED) {
+      const int err = errno;
       return panvk_errorf(device, VK_ERROR_MEMORY_MAP_FAILED,
-                          "Memory object couldn't be mapped.");
+                          "Memory object couldn't be mapped at %p (size 0x%" PRIx64
+                          "): %s.",
+                          host_addr, size, strerror(err));
+   }
 
    assert(!host_addr || addr == host_addr);
    mem->addr.host = addr;
@@ -367,15 +385,25 @@ panvk_UnmapMemory2KHR(VkDevice _device,
    VK_FROM_HANDLE(panvk_device, device, _device);
    VK_FROM_HANDLE(panvk_device_memory, mem, pMemoryUnmapInfo->memory);
 
+   if (mem == NULL || mem->addr.host == NULL)
+      return panvk_errorf(device, VK_ERROR_MEMORY_MAP_FAILED,
+                          "Memory object is not mapped.");
+
    if (pMemoryUnmapInfo->flags & VK_MEMORY_UNMAP_RESERVE_BIT_EXT) {
       void *reserved =
          os_mmap(mem->addr.host, pan_kmod_bo_size(mem->bo), PROT_NONE,
                  MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
-      if (reserved == MAP_FAILED)
+      if (reserved == MAP_FAILED) {
+         const int err = errno;
          return panvk_errorf(device, VK_ERROR_MEMORY_MAP_FAILED,
-                             "Failed to reserve VA on unmap.");
+                             "Failed to reserve VA at %p (size 0x%" PRIx64
+                             ") on unmap: %s.",
+                             mem->addr.host, pan_kmod_bo_size(mem->bo),
+                             strerror(err));
+      }
    } else {
-      ASSERTED int ret = os_munmap(mem->addr.host, pan_kmod_bo_size(mem->bo));
+      ASSERTED int ret = pan_kmod_bo_munmap(mem->bo, mem->addr.host,
+                                            pan_kmod_bo_size(mem->bo));
       assert(!ret);
    }
 

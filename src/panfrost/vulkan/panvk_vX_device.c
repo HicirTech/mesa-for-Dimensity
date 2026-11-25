@@ -25,6 +25,7 @@
 #include "panvk_cmd_alloc.h"
 #include "panvk_cmd_buffer.h"
 #include "panvk_device.h"
+#include "panvk_frame_pacing.h"
 #include "panvk_cmd_draw.h"
 #include "panvk_entrypoints.h"
 #include "panvk_image_view.h"
@@ -889,10 +890,17 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
    panvk_utrace_perfetto_init(device, 2);
 #endif
 
+   result = panvk_frame_pacing_init(device);
+   if (result != VK_SUCCESS) {
+      panvk_per_arch(utrace_context_fini)(device);
+      goto err_finish_queues;
+   }
+
    *pDevice = panvk_device_to_handle(device);
    return VK_SUCCESS;
 
 err_finish_queues:
+   panvk_frame_pacing_finish(device);
    vk_foreach_queue_safe(queue, &device->vk)
       panvk_queue_destroy(queue);
 
@@ -950,6 +958,8 @@ panvk_per_arch(destroy_device)(struct panvk_device *device,
 {
    if (!device)
       return;
+
+   panvk_frame_pacing_finish(device);
 
    panvk_per_arch(utrace_context_fini)(device);
 

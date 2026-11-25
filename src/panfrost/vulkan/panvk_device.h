@@ -34,6 +34,7 @@
 
 struct panvk_precomp_cache;
 struct panvk_device_draw_context;
+struct panvk_frame_pacing;
 
 enum panvk_queue_family {
    PANVK_QUEUE_FAMILY_GPU,
@@ -160,6 +161,8 @@ struct panvk_device {
    uint32_t *dump_region_size;
 
    struct vk_device_dispatch_table cmd_dispatch;
+
+   struct panvk_frame_pacing *frame_pacing;
 
    struct panvk_precomp_cache *precomp_cache;
 

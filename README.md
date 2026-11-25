@@ -1,11 +1,4 @@
-# PanVK 9300
 
-This branch, `panvk-9300`, is upstream Mesa `main` plus a kbase backend for
-PanVK: Mesa's Vulkan driver for Arm Mali runs on stock Android devices
-through `/dev/mali0`, without root. The target is the MediaTek Dimensity
-9300+ (Immortalis-G720 MC12) running Windows games through Proton, DXVK and
-vkd3d-proton. Other Mali GPUs that the imported backend supports should keep
-working but are not tested on this branch.
 
 Not a conformant Vulkan implementation; for testing.
 
@@ -16,11 +9,7 @@ Not a conformant Vulkan implementation; for testing.
   gralloc/AHardwareBuffer import, BCn emulation, geometry, tessellation and
   transform feedback on compute, and the Android build and packaging scripts
   come from [mali-panvk](https://github.com/JimVulkan/mali-panvk) by
-  JimVulkan at `58f2c55`, imported in one commit and rebased onto `main`.
-  Its own documentation is in
-  [android/README-mali-panvk.md](android/README-mali-panvk.md).
-- This branch's own changes are the commits after that import.
-
+  JimVulkan at `58f2c55`,
 ## Building
 
 On Linux or WSL:
@@ -44,12 +33,21 @@ adrenotools-style driver loaders.
 
 | Environment | Effect |
 |---|---|
-| `PAN_USE_KRAID=all` (or `cs`, `fs`, `vs`, `internal`) | compiles with Kraid instead of the C compiler; off by default, see `src/panfrost/compiler/pan_compiler.c` |
+| `PAN_USE_KRAID` | Defaults to all stages when built with Rust support; set to `0` to disable or `cs`, `fs`, `vs`, or `internal` to select stages, see `src/panfrost/compiler/pan_compiler.c` |
 | `PANVK_DEBUG=startup` | logs why the device could not be created |
 | `PANVK_FORCE_IDVS=1` | turns index-driven vertex shading back on (off by default on Bifrost) |
 | `PANVK_NO_MEDIUMP=1` | compiles `mediump` shader code at 32 bits |
+| `PANVK_PACING=0` | disables per-swapchain EMA frame pacing before WSI present (enabled by default) |
+| `PANVK_PACING_HZ` | sets the pacing refresh-rate fallback in Hz (default `60`) |
+| `PANVK_PACING_DEBUG=1` | logs EMA, sleep delay, timing source, and pacing decision |
 | `MESA_SHADER_CACHE_DISABLE=true` | turns the disk shader cache off |
 | `MESA_LOG=file` | writes the driver's log, including GPU fault details, to a file |
+
+`VK_EXT_present_timing` is available on WSI-enabled builds across PanVK
+architectures that support GPU timestamps. Surface-specific timing modes are
+reported by Mesa's WSI backend. When enabled, pacing observes timing results
+returned to the application; CPU monotonic deltas are used until timing results
+are available.
 
 ## License
 
