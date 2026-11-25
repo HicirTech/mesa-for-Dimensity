@@ -1182,6 +1182,12 @@ kbase_kmod_bo_alloc(struct pan_kmod_dev *dev, struct pan_kmod_vm *exclusive_vm, 
    bo->same_va = !exec;
 
    const uint64_t pages = DIV_ROUND_UP(size, 4096);
+   uint64_t rw_flags = KBASE_MEM_FLAGS_RW;
+   if (flags & PAN_KMOD_BO_FLAG_IO_COHERENT) {
+      rw_flags &= ~BASE_MEM_COHERENT_LOCAL;
+      rw_flags |= BASE_MEM_COHERENT_SYSTEM;
+   }
+
    union kbase_ioctl_mem_alloc req = {
       .in = {
          .va_pages = pages + guard,
@@ -1189,7 +1195,7 @@ kbase_kmod_bo_alloc(struct pan_kmod_dev *dev, struct pan_kmod_vm *exclusive_vm, 
                               : pages + (gmode == KBASE_GUARD_ABSORB),
          .extension = grow ? KBASE_GROW_STEP_PAGES : 0,
          .flags = exec ? KBASE_MEM_FLAGS_EXEC
-                       : KBASE_MEM_FLAGS_RW | (grow ? BASE_MEM_GROW_ON_GPF : 0) |
+                       : rw_flags | (grow ? BASE_MEM_GROW_ON_GPF : 0) |
                             (kbase_mem_group() << BASEP_MEM_GROUP_ID_SHIFT) |
                             ((flags & PAN_KMOD_BO_FLAG_WB_MMAP) ? BASE_MEM_CACHED_CPU : 0),
       },
@@ -3587,10 +3593,17 @@ kbase_csf_thread(void *arg)
             uint32_t status;
             memcpy(&sideband, &notes[o + 24], sizeof(sideband));
             memcpy(&status, &notes[o + 32], sizeof(status));
-            mesa_loge("kbase: queue group %u: %s (type %u), status 0x%08x (exception 0x%02x), "
-                      "sideband 0x%016" PRIx64 ", queue %u",
-                      handle, kind < ARRAY_SIZE(kinds) ? kinds[kind] : "unknown", kind, status,
-                      status & 0xff, sideband, kind == 1 ? notes[o + 36] : 0);
+            if (kind == 1) {
+               mesa_loge("kbase: queue group %u: %s (type %u), status 0x%08x "
+                         "(exception 0x%02x), sideband 0x%016" PRIx64 ", queue %u",
+                         handle, kind < ARRAY_SIZE(kinds) ? kinds[kind] : "unknown", kind,
+                         status, status & 0xff, sideband, notes[o + 36]);
+            } else {
+               mesa_loge("kbase: queue group %u: %s (type %u), status 0x%08x "
+                         "(exception 0x%02x), sideband 0x%016" PRIx64,
+                         handle, kind < ARRAY_SIZE(kinds) ? kinds[kind] : "unknown", kind,
+                         status, status & 0xff, sideband);
+            }
             kbase_log_persist("queue group %u: %s (type %u), status 0x%08x, sideband 0x%016" PRIx64,
                               handle, kind < ARRAY_SIZE(kinds) ? kinds[kind] : "unknown", kind,
                               status, sideband);
@@ -3610,8 +3623,11 @@ kbase_csf_thread(void *arg)
                   kbase_log_persist("  its last bytes: %s", tail);
                }
                const uint64_t around = 256ull << 10;
-               kbase_log_maps_range(sideband > around ? sideband - around : 0,
-                                    sideband + around, 16);
+               const uint64_t lo = sideband > around ? sideband - around : 0;
+               const uint64_t hi = sideband > UINT64_MAX - around
+                                      ? UINT64_MAX
+                                      : sideband + around;
+               kbase_log_maps_range(lo, hi, 16);
                /* Before the group is marked faulted: until then nothing completes, so the
                 * command buffers that faulted are still intact for the scan. */
                kbase_explain_cpu_view(sideband);

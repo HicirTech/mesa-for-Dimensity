@@ -115,9 +115,12 @@ panvk_device_init_mempools(struct panvk_device *dev)
    panvk_pool_init(&dev->mempools.exec, dev, NULL, NULL, &exec_pool_props);
 
    struct panvk_pool_properties sync_pool_props = rw_pool_props;
-   sync_pool_props.label = "Device sync object pool";
-   if (pan_kmod_kbase_is_csf(dev->kmod.dev))
-      sync_pool_props.create_flags = PAN_KMOD_BO_FLAG_KBASE_SYNC;
+   sync_pool_props.label = "Device cross-queue synchronization memory pool";
+   sync_pool_props.create_flags = panvk_device_adjust_bo_flags(
+      dev, PAN_KMOD_BO_FLAG_WB_MMAP |
+              (pan_kmod_dev_is_kbase(dev->kmod.dev)
+                  ? PAN_KMOD_BO_FLAG_IO_COHERENT
+                  : 0));
    panvk_pool_init(&dev->mempools.sync, dev, NULL, NULL, &sync_pool_props);
 
    /* What command buffers leave behind is kept up to a few frames' worth; a burst past that,

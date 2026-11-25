@@ -1086,7 +1086,8 @@ calc_render_descs_size(struct panvk_cmd_buffer *cmdbuf)
 }
 
 static void
-cs_render_desc_ringbuf_reserve(struct cs_builder *b, uint32_t size)
+cs_render_desc_ringbuf_reserve(struct panvk_cmd_buffer *cmdbuf,
+                               struct cs_builder *b, uint32_t size)
 {
    /* Make sure we don't allocate more than the ringbuf size. */
    assert(size <= RENDER_DESC_RINGBUF_SIZE);
@@ -1107,7 +1108,7 @@ cs_render_desc_ringbuf_reserve(struct cs_builder *b, uint32_t size)
 
    /* Decrement the syncobj to reflect the fact we're reserving memory. */
    cs_move32_to(b, sz_reg, -size);
-   cs_sync32_add(b, false, MALI_CS_SYNC_SCOPE_CSG, sz_reg, ringbuf_sync,
+   cs_sync32_add(b, false, panvk_cs_signal_scope(cmdbuf), sz_reg, ringbuf_sync,
                  cs_now());
 }
 
@@ -1275,7 +1276,7 @@ get_tiler_desc(struct panvk_cmd_buffer *cmdbuf)
    if (simul_use) {
       uint32_t descs_sz = calc_render_descs_size(cmdbuf);
 
-      cs_render_desc_ringbuf_reserve(b, descs_sz);
+      cs_render_desc_ringbuf_reserve(cmdbuf, b, descs_sz);
 
       /* Reserve ringbuf mem. */
       cs_update_vt_ctx(b) {
@@ -6012,7 +6013,7 @@ issue_fragment_jobs(struct panvk_cmd_buffer *cmdbuf)
 #endif
 
       if (free_render_descs) {
-         cs_sync32_add(b, true, MALI_CS_SYNC_SCOPE_CSG, release_sz,
+         cs_sync32_add(b, true, panvk_cs_signal_scope(cmdbuf), release_sz,
                        ringbuf_sync_addr, async);
       }
 

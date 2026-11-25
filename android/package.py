@@ -2,7 +2,7 @@
 """Package a stripped driver as an adrenotools-style zip: meta.json, libvulkan_panfrost.so and
 the third-party notices (NOTICE.txt).
 
-usage: package.py <stripped libvulkan_panfrost.so> <output dir>
+usage: package.py <stripped libvulkan_panfrost.so> <output dir> [package version]
 """
 import json
 import os
@@ -46,7 +46,7 @@ def unstripped_sections(path):
 
 
 def main():
-    if len(sys.argv) != 3:
+    if len(sys.argv) not in (3, 4):
         sys.exit(__doc__)
     lib, out_dir = sys.argv[1], sys.argv[2]
 
@@ -64,7 +64,7 @@ def main():
     vulkan = 'Vulkan 1.3.%s' % patch.group(1)
 
     commit = git('rev-parse', '--short', 'HEAD')
-    count = git('rev-list', '--count', 'HEAD') or '1'
+    count = sys.argv[3] if len(sys.argv) == 4 else (git('rev-list', '--count', 'HEAD') or '1')
     suffix = '-' + commit if commit else ''
 
     meta = {

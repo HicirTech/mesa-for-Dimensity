@@ -5,6 +5,7 @@
 
 #include "panvk_cmd_buffer.h"
 #include "panvk_queue.h"
+#include "kmod/kbase_kmod.h"
 
 enum panvk_instr_work_type {
    PANVK_INSTR_WORK_TYPE_CMDBUF,
@@ -90,6 +91,24 @@ void panvk_per_arch(panvk_instr_end_work_async)(
    const struct panvk_instr_end_args *const args,
    struct cs_async_op ts_async_op);
 
+static inline enum mali_cs_sync_scope
+panvk_cs_signal_scope(const struct panvk_cmd_buffer *cmdbuf)
+{
+   const struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
+   return pan_kmod_dev_is_kbase(dev->kmod.dev) ? MALI_CS_SYNC_SCOPE_SYSTEM
+                                               : MALI_CS_SYNC_SCOPE_CSG;
+}
+
+static inline void
+panvk_kbase_wait_deferred_syncs(const struct panvk_cmd_buffer *cmdbuf,
+                               struct cs_builder *b)
+{
+   const struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
+
+   if (pan_kmod_dev_is_kbase(dev->kmod.dev))
+      cs_wait_slot(b, SB_ID(DEFERRED_SYNC));
+}
+
 #define PANVK_INSTR_SYNC_OPS(__cnt_width)                                      \
    static inline void panvk_instr_sync##__cnt_width##_add(                     \
       struct panvk_cmd_buffer *cmdbuf, enum panvk_subqueue_id id,              \
@@ -99,6 +118,8 @@ void panvk_per_arch(panvk_instr_end_work_async)(
       struct cs_builder *b = panvk_get_cs_builder(cmdbuf, id);                 \
       panvk_per_arch(panvk_instr_begin_work)(                                  \
          id, cmdbuf, PANVK_INSTR_WORK_TYPE_SYNC##__cnt_width##_ADD);           \
+      if (scope == MALI_CS_SYNC_SCOPE_CSG)                                     \
+         scope = panvk_cs_signal_scope(cmdbuf);                                \
       cs_sync##__cnt_width##_add(b, propagate_error, scope, val, addr, async); \
       struct panvk_instr_end_args instr_info = {                               \
          .sync = {.addr_regs = addr, .val_regs = val},                         \
@@ -117,6 +138,7 @@ void panvk_per_arch(panvk_instr_end_work_async)(
       struct cs_builder *b = panvk_get_cs_builder(cmdbuf, id);                 \
       panvk_per_arch(panvk_instr_begin_work)(                                  \
          id, cmdbuf, PANVK_INSTR_WORK_TYPE_SYNC##__cnt_width##_WAIT);          \
+      panvk_kbase_wait_deferred_syncs(cmdbuf, b);                              \
       cs_sync##__cnt_width##_wait(b, reject_error, cond, ref, addr);           \
       struct panvk_instr_end_args instr_info = {                               \
          .sync = {.addr_regs = addr, .val_regs = ref, .cond = cond},           \
